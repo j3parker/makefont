@@ -5,6 +5,7 @@
 #include <math.h>
 #include <ft2build.h>
 #include FT_FREETYPE_H
+#include FT_STROKER_H
 #include FT_LCD_FILTER_H
 
 FT_Library ft_lib;
@@ -23,6 +24,8 @@ typedef struct {
   char c;
   u32 w, h;
   u32 s0, t0, s1, t1;
+  f64 offsetx, offsety;
+  f64 advancex, advancey;
 } rGlyph_t;
 
 rGlyph_t glyphs[alphabetLen];
@@ -40,6 +43,8 @@ u32 texSizeRef;
 u32 texPadding;
 
 u32 renderFlags = FT_RENDER_MODE_NORMAL;
+
+u32 numTex = 0;
 
 void setFontSize(u32 fontSize) {
   FT_Matrix matrix = { (int)((1.0/64.0) * 0x10000L),
@@ -88,7 +93,7 @@ void makeSDFTexture(u8* dstTex, u8* srcTex, u32 winSize, u32 texSize) {
 
       u8 tcolor;
       if(scolor) {
-        tcolor = (u8)round(127.0 + dist*128.0)* 0 + 255.0;
+        tcolor = (u8)round(127.0 + dist*128.0);
       } else {
         tcolor = (u8)round((1.0 - dist)*127.0);
       }
@@ -205,6 +210,11 @@ bool binPack(u32 fontSize, u32 texSize) {
     u32 w = ft_face->glyph->bitmap.width;
     u32 h = ft_face->glyph->bitmap.rows;
 
+    glyphs[index].advancex = ft_face->glyph->advance.x/64.0;
+    glyphs[index].advancey = ft_face->glyph->advance.y/64.0;
+    glyphs[index].offsetx = ft_face->glyph->bitmap_left;
+    glyphs[index].offsety = ft_face->glyph->bitmap_top;
+
     if(w >= texSize) return false; // unlikely but necessary check
 
     if(cx + w >= texSize) {
@@ -269,15 +279,28 @@ u32 findMax(bool (*func)(u32, u32), u32 texSize) {
   return guess;
 }
 
-void printGlyphs() {
+void printMetrics() {
+  printf("max=%d\n", texSizeRef);
+  printf("numTex=%d\n", numTex);
+  printf("numChars=%d\n", (i32)alphabetLen);
   for(size_t index = 0; index < alphabetLen; index++) {
-    printf("%c: W=%d H=%d\n", glyphs[index].c, glyphs[index].w, glyphs[index].h);
+    printf("%c: s0=%f t0=%f s1=%f t1=%f advancex=%f advancey=%f offsetx=%f offsety=%f\n",
+           glyphs[index].c,
+           (f64)glyphs[index].s0/(f64)texSizeRef,
+           (f64)glyphs[index].t0/(f64)texSizeRef,
+           (f64)glyphs[index].s1/(f64)texSizeRef,
+           (f64)glyphs[index].t1/(f64)texSizeRef,
+           glyphs[index].advancex/(f64)texSizeRef,
+           glyphs[index].advancey/(f64)texSizeRef,
+           glyphs[index].offsetx/(f64)texSizeRef,
+           glyphs[index].offsety/(f64)texSizeRef
+           );
   }
 }
 
 int main(int argc, char **argv) {
   if(argc != 5) {
-    printf("Usage: makefont <texture size> <glyph padding> <SDF window size> <font file>\n");
+    fprintf(stderr, "Usage: makefont <texture size> <glyph padding> <SDF window size> <font file>\n");
     exit(1);
   }
   texSizeRef = atoi(argv[1]);
@@ -300,9 +323,9 @@ int main(int argc, char **argv) {
    * Find the best font size for desired texture size and
    * figure out the bin locations
    */
-  printf("Finding packing for a reference texture of size %dx%d...\n", texSizeRef, texSizeRef);
+  fprintf(stderr, "Finding packing for a reference texture of size %dx%d...\n", texSizeRef, texSizeRef);
   int fontSize =  findMax(binPack, texSizeRef);
-  printf("Packing found. Efficiency = %f%%, with font size %d\n\n\n", 100.0*(f64)efficiency/(f64)texSizeRef/(f64)texSizeRef, fontSize);
+  fprintf(stderr, "Packing found. Efficiency = %f%%, with font size %d\n\n\n", 100.0*(f64)efficiency/(f64)texSizeRef/(f64)texSizeRef, fontSize);
 
   assert(findFontSize(fontSize, texSizeRef));  
   assert(!findFontSize(fontSize + 1, texSizeRef));
@@ -316,7 +339,7 @@ int main(int argc, char **argv) {
   while(1) {
     // Find best font size to fit the bins for this texture size
     u32 fontSize = findMax(findFontSize, texSize);
-    printf("Best font size for %dx%d: %d\n", texSize, texSize, fontSize);
+    fprintf(stderr, "Best font size for %dx%d: %d\n", texSize, texSize, fontSize);
 
     // Fonts smaller than this look bad anyway XXX user configurable?
     if(fontSize < 5) break;
@@ -329,13 +352,16 @@ int main(int argc, char **argv) {
 
     snprintf(filename, 128, "%s_%d.png", name, texSize);
     lodepng_encode24_file(filename, texSDF, texSize, texSize);
-    printf("Saved %s.\n\n", filename);
+    numTex++;
+    fprintf(stderr, "Saved %s.\n\n", filename);
 
     free(texGrey);
     free(texSDF);
 
     texSize /= 2;
   }
+
+  printMetrics();
 
   FT_Done_FreeType(ft_lib);
 }
