@@ -1,4 +1,4 @@
-CFLAGS=--std=c99 `freetype-config --cflags` -Wextra -pedantic -Werror
+CFLAGS=--std=c99 `freetype-config --cflags` -O3 -Wextra -pedantic -Werror
 LDFLAGS=-lm `freetype-config --libs`
 TARGET=makefont
 

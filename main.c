@@ -12,6 +12,7 @@ FT_Face ft_face;
 
 typedef uint8_t u8;
 typedef uint32_t u32;
+typedef int32_t i32;
 typedef float f32;
 typedef double f64;
 
@@ -26,7 +27,12 @@ typedef struct {
 
 rGlyph_t glyphs[alphabetLen];
 
-int max(int a, int b) { return a > b ? a : b; }
+u32 u32max(u32 a, u32 b) { return a > b ? a : b; }
+u32 u32min(u32 a, u32 b) { return a > b ? b : a; }
+i32 i32min(i32 a, i32 b) { return a > b ? b : a; }
+i32 i32max(i32 a, i32 b) { return a > b ? a : b; }
+f64 f64cap(f64 low, f64 high, f64 x) { if(x < low) x = low; if(x > high) x = high; return x; }
+#define f64min fminf
 
 f32 efficiency;
 
@@ -45,17 +51,63 @@ void setFontSize(u32 fontSize) {
 }
 
 /**
- * Actually renders the atlas
+ * Compute signed distance field for srcTex (1 channel) and store in dstTex.
+ * The channels for dstTex are: 
+ * red   = SDF
+ * green = top right/bottom left SDF
+ * blue  = alpha (anti-aliasing)
+ */
+void makeSDFTexture(u8* dstTex, u8* srcTex, u32 winSize, u32 texSize) {
+  memset(dstTex, 0, texSize*texSize*3);
+  assert(srcTex != NULL);
+  assert(dstTex != NULL);
+  // 255 means glyph pixel, 0 means no glyph
+  for(i32 sy = 0; sy < (i32)texSize; sy++) {
+    for(i32 sx = 0; sx < (i32)texSize; sx++) {
+      u32 minSqrDist = (winSize + 1)*(winSize + 1);
+
+      u8 scolor = srcTex[sx + sy*texSize];
+
+      for(i32 py = i32max(0, sy - winSize); py < i32min(texSize, sy + winSize); py++) {
+        for(i32 px = i32max(0, sx - winSize); px < i32min(texSize, sx + winSize); px++) {
+          assert(px >= 0 && px < (i32)texSize);
+          assert(py >= 0 && py < (i32)texSize);
+          if(py == sy && px == sx) continue;
+          u8 pcolor = srcTex[px + py*texSize];
+          if((!scolor) != (!pcolor)) { // one is black and the other is not black
+            i32 dist = (sx - px)*(sx - px) + (sy - py)*(sy - py);
+            minSqrDist = u32min(minSqrDist, dist);
+          }
+        }
+      }
+
+      f64 minDist = sqrt((f64)minSqrDist);
+
+      // [0, winSize + 1] --> [0, 1]
+      f64 dist = f64cap(0.0, 1.0, minDist/(f64)winSize);
+
+      u8 tcolor;
+      if(scolor) {
+        tcolor = (u8)round(127.0 + dist*128.0)* 0 + 255.0;
+      } else {
+        tcolor = (u8)round((1.0 - dist)*127.0);
+      }
+
+      dstTex[(sx + sy*texSize)*3 + 0] = tcolor;
+      dstTex[(sx + sy*texSize)*3 + 1] = tcolor;
+
+      dstTex[(sx + sy*texSize)*3 + 2] = scolor;
+    }
+  }
+}
+
+/**
+ * Renders the atlas
  */
 void makeTexture(u32 fontSize, u32 texSize, u8* tex) {
+  assert(tex != NULL);
   setFontSize(fontSize);
-  memset(tex, 0, texSize*texSize*4);
-  for(size_t i = 0; i < texSize*texSize; i++) {
-    tex[i*4 + 0] = 255;
-    tex[i*4 + 1] = 255;
-    tex[i*4 + 2] = 255;
-    tex[i*4 + 3] = 255;
-  }
+  memset(tex, 0, texSize*texSize);
   for(size_t index = 0; index < alphabetLen; index++) {
     int glyph_index = FT_Get_Char_Index(ft_face, glyphs[index].c);
     assert(glyph_index);
@@ -77,12 +129,7 @@ void makeTexture(u32 fontSize, u32 texSize, u8* tex) {
     assert(py + h < texSize);
     
     for(u32 i = 0; i < h; i++) {
-      for(u32 j = 0; j < w; j++) {
-        u8 color = 255-buf[j + i*p];
-        tex[(px + j)*4 + (py + i)*texSize*4 + 0] = color;
-        tex[(px + j)*4 + (py + i)*texSize*4 + 1] = color;
-        tex[(px + j)*4 + (py + i)*texSize*4 + 2] = color;
-      }
+      memcpy(&tex[px + (py + i)*texSize], &buf[i*p], w);
     }
   }
 }
@@ -181,7 +228,7 @@ bool binPack(u32 fontSize, u32 texSize) {
 
     cx += texPadding;
 
-    maxHeight = max(maxHeight, h);
+    maxHeight = u32max(maxHeight, h);
 
     // debug stuff
     efficiency += (glyphs[index].s1 - glyphs[index].s0)*(glyphs[index].t1 - glyphs[index].t0);
@@ -229,13 +276,14 @@ void printGlyphs() {
 }
 
 int main(int argc, char **argv) {
-  if(argc != 4) {
-    printf("Usage: makefont <texture size> <glyph padding> <font file>\n");
+  if(argc != 5) {
+    printf("Usage: makefont <texture size> <glyph padding> <SDF window size> <font file>\n");
     exit(1);
   }
   texSizeRef = atoi(argv[1]);
   texPadding = atoi(argv[2]);
-  char* name = argv[3];
+  u32 sdfWin = atoi(argv[3]);
+  char* name = argv[4];
   char filename[128];
   snprintf(filename, 128, "%s.ttf", name);
 
@@ -266,15 +314,26 @@ int main(int argc, char **argv) {
    */
   u32 texSize = texSizeRef; 
   while(1) {
+    // Find best font size to fit the bins for this texture size
     u32 fontSize = findMax(findFontSize, texSize);
-    if(fontSize < 5) break;
-    u8 *tex = malloc(texSize*texSize*4);
     printf("Best font size for %dx%d: %d\n", texSize, texSize, fontSize);
-    makeTexture(fontSize, texSize, tex);
+
+    // Fonts smaller than this look bad anyway XXX user configurable?
+    if(fontSize < 5) break;
+
+    u8 *texGrey = malloc(texSize*texSize);
+    u8 *texSDF = malloc(texSize*texSize*3);
+
+    makeTexture(fontSize, texSize, texGrey);
+    makeSDFTexture(texSDF, texGrey, (f64)sdfWin/(f64)texSizeRef*(f64)texSize, texSize);
+
     snprintf(filename, 128, "%s_%d.png", name, texSize);
-    lodepng_encode32_file(filename, tex, texSize, texSize);
+    lodepng_encode24_file(filename, texSDF, texSize, texSize);
     printf("Saved %s.\n\n", filename);
-    free(tex);
+
+    free(texGrey);
+    free(texSDF);
+
     texSize /= 2;
   }
 
